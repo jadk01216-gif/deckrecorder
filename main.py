@@ -3,9 +3,11 @@ import zipfile
 import json
 import os
 
-# --- v4.1 核心修復：嵌套牌組排序與路徑同步 ---
+# --- v4.1.2 核心修復與版本更新 ---
 # 1. 修正嵌套牌組 (Deck::SubDeck) 在移動時，因父路徑變更導致的 ID 查找失敗。
 # 2. 優化層級處理邏輯，確保父牌組優先獲得排序前綴，子牌組正確繼承。
+# 3. 更新顯示名稱為 Deck_Reorder (v4.1.2)，確保 Anki 介面顯示符合要求。
+# 4. 匯出檔案名稱維持為 Deck_Reorder.ankiaddon。
 
 ADDON_CODE = """
 import time
@@ -33,7 +35,7 @@ I18N = {
         "move_btm": "⏬ 移至底部",
         "adv_mgr": "🛠️ 進階管理器...",
         "save": "✅ 儲存並套用",
-        "title": "進階排序管理器 (v4.1)",
+        "title": "Deck_Reorder 管理器 (v4.1.2)",
         "success": "設定已存檔並套用",
         "settings_group": "自動化與介面設定",
         "lang_label": "介面語言:",
@@ -52,7 +54,7 @@ I18N = {
         "move_btm": "⏬ Move to Bottom",
         "adv_mgr": "🛠️ Advanced Manager...",
         "save": "✅ Save and Apply",
-        "title": "Advanced Deck Manager (v4.1)",
+        "title": "Deck_Reorder Manager (v4.1.2)",
         "success": "Settings saved and applied",
         "settings_group": "Automation & UI Settings",
         "lang_label": "Language:",
@@ -92,11 +94,9 @@ def apply_order_ultimate(ordered_ids):
         mw.checkpoint("Deck Reorder")
         mw.col.modSchema(check=False)
         
-        # 1. 取得目前所有牌組的乾淨名稱映射
         all_decks = list(mw.col.decks.all_names_and_ids())
         id_to_clean_full = {d.id: clean_name(d.name) for d in all_decks if d.id != 1}
         
-        # 2. 暫時重命名，避免重名衝突
         temp_root = f"__REORDER_{int(time.time())}__"
         for d in all_decks:
             if d.id == 1: continue
@@ -104,7 +104,6 @@ def apply_order_ultimate(ordered_ids):
             if deck: mw.col.decks.rename(deck, f"{temp_root}_{d.id}")
         mw.col.decks.save()
 
-        # 3. 生成「單層級」的排序標籤
         id_to_sort_label = {}
         for counter, did in enumerate(ordered_ids):
             if did not in id_to_clean_full: continue
@@ -112,7 +111,6 @@ def apply_order_ultimate(ordered_ids):
             single_name = id_to_clean_full[did].split('::')[-1]
             id_to_sort_label[did] = prefix + single_name
 
-        # 4. 重新建立完整路徑映射
         final_tasks = []
         sorted_dids = sorted(id_to_clean_full.keys(), key=lambda did: id_to_clean_full[did].count('::'))
         clean_path_to_id = {v: k for k, v in id_to_clean_full.items()}
@@ -129,7 +127,6 @@ def apply_order_ultimate(ordered_ids):
             final_path = "::".join(new_path_parts)
             final_tasks.append((did, final_path))
 
-        # 5. 按照路徑深度執行重命名
         final_tasks.sort(key=lambda x: x[1].count('::'))
         for did, final_name in final_tasks:
             tmp_name = f"{temp_root}_{did}"
@@ -290,10 +287,11 @@ def init():
 gui_hooks.main_window_did_init.append(init)
 """
 
+# 重要：這裡的 name 決定了 Anki 附加元件清單中顯示的名稱，現在包含版本號
 MANIFEST = {
     "package": "UltimateDeckReorderPlus",
-    "name": "Ultimate Deck Reorder (v4.1)",
-    "mod": 1710850009
+    "name": "Deck_Reorder (v4.1.2)",
+    "mod": 1710850016
 }
 
 DEFAULT_CONFIG = {
@@ -304,12 +302,21 @@ DEFAULT_CONFIG = {
 }
 
 def build_addon():
-    filename = 'UltimateDeckReorderPlus.ankiaddon'
+    # 檔案名稱保持不變為 Deck_Reorder.ankiaddon
+    filename = 'Deck_Reorder.ankiaddon'
     with zipfile.ZipFile(filename, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr('__init__.py', ADDON_CODE.strip())
         zf.writestr('manifest.json', json.dumps(MANIFEST, indent=4, ensure_ascii=False))
+        
+        # 新增 meta.json：確保 Anki 主程式清單顯示帶有版本號的名稱
+        meta_data = {
+            "name": MANIFEST["name"],
+            "mod": MANIFEST["mod"]
+        }
+        zf.writestr('meta.json', json.dumps(meta_data, indent=4, ensure_ascii=False))
+        
         zf.writestr('config.json', json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False))
-    print(f"Build Successful (v4.1): {os.path.abspath(filename)}")
+    print(f"Build Successful (v4.1.2): {os.path.abspath(filename)}")
 
 if __name__ == "__main__":
     build_addon()
