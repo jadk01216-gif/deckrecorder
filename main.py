@@ -4,9 +4,9 @@ import json
 import os
 
 # --- v4.1.2 核心修復與版本更新 ---
-# 1. 修正嵌套牌組 (Deck::SubDeck) 在移動時，因父路徑變更導致的 ID 查找失敗。
-# 2. 優化層級處理邏輯，確保父牌組優先獲得排序前綴，子牌組正確繼承。
-# 3. 更新顯示名稱為 Deck_Reorder (v4.1.2)，確保 Anki 介面顯示符合要求。
+# 1. 強化嵌套牌組修復：採用「倒序重命名」策略，防止父層路徑變更導致子層失效。
+# 2. 增加安全檢查：確保在重新命名每個牌組前，即時抓取最新的牌組物件。
+# 3. 顯示名稱保持為 Deck_Reorder (v4.1.2)。
 # 4. 匯出檔案名稱維持為 Deck_Reorder.ankiaddon。
 
 ADDON_CODE = """
@@ -94,16 +94,22 @@ def apply_order_ultimate(ordered_ids):
         mw.checkpoint("Deck Reorder")
         mw.col.modSchema(check=False)
         
+        # 1. 建立 ID 到 原始清爽路徑的映射
         all_decks = list(mw.col.decks.all_names_and_ids())
         id_to_clean_full = {d.id: clean_name(d.name) for d in all_decks if d.id != 1}
         
+        # 2. 先將所有牌組重新命名到臨時根目錄，徹底切斷父子關聯
+        # 使用倒序 (深層優先) 以免路徑失效
         temp_root = f"__REORDER_{int(time.time())}__"
-        for d in all_decks:
-            if d.id == 1: continue
-            deck = mw.col.decks.get(d.id)
-            if deck: mw.col.decks.rename(deck, f"{temp_root}_{d.id}")
+        sorted_all_ids = sorted(id_to_clean_full.keys(), key=lambda did: id_to_clean_full[did].count('::'), reverse=True)
+        
+        for did in sorted_all_ids:
+            deck = mw.col.decks.get(did)
+            if deck:
+                mw.col.decks.rename(deck, f"{temp_root}_{did}")
         mw.col.decks.save()
 
+        # 3. 準備新的排序前綴
         id_to_sort_label = {}
         for counter, did in enumerate(ordered_ids):
             if did not in id_to_clean_full: continue
@@ -111,22 +117,23 @@ def apply_order_ultimate(ordered_ids):
             single_name = id_to_clean_full[did].split('::')[-1]
             id_to_sort_label[did] = prefix + single_name
 
-        final_tasks = []
-        sorted_dids = sorted(id_to_clean_full.keys(), key=lambda did: id_to_clean_full[did].count('::'))
+        # 4. 根據新的層級結構生成最終路徑
         clean_path_to_id = {v: k for k, v in id_to_clean_full.items()}
-
-        for did in sorted_dids:
+        final_tasks = []
+        for did in id_to_clean_full.keys():
             parts = id_to_clean_full[did].split('::')
             new_path_parts = []
-            for p in parts:
-                original_layer_path = "::".join(parts[:len(new_path_parts)+1])
-                layer_id = clean_path_to_id.get(original_layer_path)
-                label = id_to_sort_label.get(layer_id, p)
+            for i in range(len(parts)):
+                current_layer_path = "::".join(parts[:i+1])
+                layer_id = clean_path_to_id.get(current_layer_path)
+                # 如果該層級在 ordered_ids 中有定義排序，則使用排序標籤，否則使用原名
+                label = id_to_sort_label.get(layer_id, parts[i])
                 new_path_parts.append(label)
             
             final_path = "::".join(new_path_parts)
             final_tasks.append((did, final_path))
 
+        # 5. 從淺層到深層 (頂層優先) 恢復正式路徑，確保父牌組先存在
         final_tasks.sort(key=lambda x: x[1].count('::'))
         for did, final_name in final_tasks:
             tmp_name = f"{temp_root}_{did}"
@@ -137,6 +144,8 @@ def apply_order_ultimate(ordered_ids):
         mw.col.decks.save()
         mw.reset()
         if mw.deckBrowser: mw.deckBrowser.refresh()
+    except Exception as e:
+        print(f"Reorder Error: {e}")
     finally:
         _is_reordering = False
 
@@ -291,7 +300,7 @@ gui_hooks.main_window_did_init.append(init)
 MANIFEST = {
     "package": "UltimateDeckReorderPlus",
     "name": "Deck_Reorder (v4.1.2)",
-    "mod": 1710850016
+    "mod": 1710850017
 }
 
 DEFAULT_CONFIG = {
