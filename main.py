@@ -3,7 +3,7 @@ import zipfile
 import json
 import os
 
-# --- v4.2.7 核心修復與無限位數演算法 ---
+# --- v4.2.8 核心修復與無限位數演算法 ---
 # 1. 演算法 2.0: 導入 Elias Gamma 變體編碼，實現理論上「無限位數」的動態隱形字元排序。
 # 2. 順水推舟法: 完美解決嵌套牌組問題。順應 Anki 原生「改母連動子」的機制，採 Top-Down 即時讀取與覆寫。
 # 3. 修復母牌組拖曳: 客製化 ReorderTreeWidget 嚴格限制僅能進行同層級的兄弟節點重排。
@@ -11,14 +11,16 @@ import os
 # 5. 動態語系切換: 儲存設定時，立即同步更新 Anki「工具」選單中的管理器名稱。
 # 6. 修正 Qt 6.9 拖曳報錯: 支援 event.position().toPoint() 相容寫法。
 # 7. 進階管理器擴充: 加入 UI 內的「上移/下移/頂端/底端/自訂格數/移置母牌組」按鈕。
-# 8. [v4.2.7] 齒輪擴充與教學: 齒輪選單加入「移動自訂格數...」，並在進階編輯器加入「📖 用法教學」。
+# 8. 齒輪擴充與教學: 齒輪選單加入「移動自訂格數...」，並在進階編輯器加入「📖 用法教學」。
+# 9. [v4.2.8] 攔截原生拖曳: 禁用 Anki 容易誤觸的原生拖曳，並彈窗引導使用者使用新的重排工具。
 
 ADDON_CODE = """
 import time
 from aqt import mw
 from aqt.qt import *
-from aqt.utils import tooltip
+from aqt.utils import tooltip, showInfo
 from aqt import gui_hooks
+from aqt.deckbrowser import DeckBrowser
 
 # --- Constants ---
 CHAR_0 = '\\u200b' # A (較小)
@@ -43,7 +45,7 @@ I18N = {
         "adv_mgr": "🛠️ 進階管理器...",
         "save": "✅ 儲存並套用",
         "help_btn": "📖 用法教學",
-        "title": "Deck_Reorder 管理器 (v4.2.7)",
+        "title": "Deck_Reorder 管理器 (v4.2.8)",
         "success": "設定已存檔並套用",
         "settings_group": "自動化與介面設定",
         "lang_label": "介面語言:",
@@ -63,6 +65,7 @@ I18N = {
         "dialog_parent_root": "< 最上層 (無) >",
         "warn_out_of_bounds": "移動步數超出範圍！\\n只能在 0 到 {max_idx} 之間移動。",
         "warn_cannot_move": "已經在最邊緣，無法再移動了！",
+        "warn_native_drag": "🚫 偵測到原生拖曳操作！\\n\\nAnki 原生的拖曳只能把牌組變成子牌組，非常容易造成版面混亂。\\n\\n💡 欲改變順序或母子關係：\\n請點擊牌組右側的「齒輪圖示 ⚙️」選擇【📂 移置母牌組】或【🛠️ 進階管理器】來進行安全編輯！",
         "tutorial_title": "Deck_Reorder 使用教學",
         "tutorial_text": "【拖曳排序】\\n可以直接用滑鼠上下拖曳牌組。系統已啟用防呆，強制只能在同一個母層級內排序，不怕把排版弄亂。\\n\\n【自訂格數】\\n輸入正數往下移，輸入負數往上移。\\n\\n【移置母牌組】\\n如果想改變牌組的階層關係（例如從別人的子牌組獨立出來），請點擊「📂 移置母牌組」，選擇新的位置。\\n\\n【自動排序與歸檔】\\n上方可設定當 Anki 匯入全新牌組時，自動幫你把它丟到列表的「最上面」或「最下面」，甚至自動塞進某個特定的「預設父牌組」中。"
     },
@@ -77,7 +80,7 @@ I18N = {
         "adv_mgr": "🛠️ Advanced Manager...",
         "save": "✅ Save and Apply",
         "help_btn": "📖 Help / Tutorial",
-        "title": "Deck_Reorder Manager (v4.2.7)",
+        "title": "Deck_Reorder Manager (v4.2.8)",
         "success": "Settings saved and applied",
         "settings_group": "Automation & UI Settings",
         "lang_label": "Language:",
@@ -97,6 +100,7 @@ I18N = {
         "dialog_parent_root": "< Root (None) >",
         "warn_out_of_bounds": "Steps out of bounds!\\nCan only move between 0 and {max_idx}.",
         "warn_cannot_move": "Already at the edge, cannot move further!",
+        "warn_native_drag": "🚫 Native Drag Detected!\\n\\nAnki's native drag-and-drop only converts decks into sub-decks, which often breaks the layout.\\n\\n💡 To reorder or change hierarchy:\\nPlease click the 'Gear Icon ⚙️' next to a deck and select 【📂 Change Parent】 or open the 【🛠️ Advanced Manager】 for safe editing!",
         "tutorial_title": "Deck_Reorder Tutorial",
         "tutorial_text": "[Drag & Drop]\\nYou can freely drag decks up or down. To prevent breaking the structure, dropping is restricted to the same parent level.\\n\\n[Custom Steps]\\nPositive number moves the deck down, negative moves it up.\\n\\n[Change Parent]\\nTo move a deck into or out of another deck, click '📂 Set Parent' and select the new destination.\\n\\n[Auto-Sort & Archive]\\nConfigure the settings above to automatically place newly imported decks at the very Top or Bottom, or even auto-route them into a specific Default Parent Deck."
     }
@@ -262,7 +266,6 @@ def quick_move(did, op):
     apply_order_ultimate(flat_ids)
     tooltip(get_msg("success"))
 
-# [v4.2.7] 新增: 在齒輪選單中移動自訂步數
 def quick_move_steps(did):
     lang = get_current_config().get(CONF_KEY_LANG, "en")
     all_d = sorted([d for d in mw.col.decks.all_names_and_ids() if d.id != 1], key=lambda d: d.name)
@@ -353,6 +356,23 @@ def quick_change_parent(did):
     mw.reset()
     if mw.deckBrowser: mw.deckBrowser.refresh()
     tooltip(get_msg("success", lang))
+
+# [v4.2.8] 核心擴充：攔截 Anki 原生的 JS 拖曳事件，防止版面混亂
+def intercept_native_drag(handled, message, context):
+    if isinstance(context, DeckBrowser) and isinstance(message, str) and message.startswith("drag:"):
+        lang = get_current_config().get(CONF_KEY_LANG, "en")
+        title = get_msg("title", lang)
+        warn_msg = get_msg("warn_native_drag", lang)
+        
+        # 彈窗提示使用者
+        showInfo(warn_msg, title=title)
+        
+        # 強制刷新一次 DeckBrowser，把因為拖曳而產生變化的 HTML 結構還原
+        mw.deckBrowser.refresh()
+        
+        # 回傳 True 告訴 Anki：「我已經處理完了，請你不要執行原生的合併牌組動作」
+        return (True, None)
+    return handled
 
 def get_event_pos(event):
     if hasattr(event, "position"): return event.position().toPoint()
@@ -461,9 +481,7 @@ class DeckManagerDialog(QDialog):
         self.tree = ReorderTreeWidget() 
         self.layout.addWidget(self.tree)
         
-        # [v4.2.7] 底部按鈕區: 加入教學按鈕與儲存按鈕並排
         bottom_layout = QHBoxLayout()
-        
         self.btn_help = QPushButton()
         self.btn_help.setFixedHeight(45)
         self.btn_help.clicked.connect(self.show_tutorial)
@@ -473,8 +491,8 @@ class DeckManagerDialog(QDialog):
         self.btn_save.setStyleSheet("background: #27ae60; color: white; font-weight: bold;")
         self.btn_save.clicked.connect(self.save)
         
-        bottom_layout.addWidget(self.btn_help, 1) # 佔用 1 單位寬
-        bottom_layout.addWidget(self.btn_save, 3) # 佔用 3 單位寬
+        bottom_layout.addWidget(self.btn_help, 1) 
+        bottom_layout.addWidget(self.btn_save, 3) 
         self.layout.addLayout(bottom_layout)
         
         self.load_tree()
@@ -500,7 +518,6 @@ class DeckManagerDialog(QDialog):
         self.btn_steps.setText(get_msg("dialog_move_steps", lang))
         self.btn_parent.setText(get_msg("dialog_parent_btn", lang))
 
-    # [v4.2.7] 顯示教學視窗
     def show_tutorial(self):
         lang = self.lang_combo.currentData()
         QMessageBox.information(self, get_msg("tutorial_title", lang), get_msg("tutorial_text", lang))
@@ -635,11 +652,8 @@ def on_deck_menu(menu, did):
     sub.addAction(get_msg("move_up")).triggered.connect(lambda: quick_move(did, "up"))
     sub.addAction(get_msg("move_down")).triggered.connect(lambda: quick_move(did, "down"))
     sub.addAction(get_msg("move_btm")).triggered.connect(lambda: quick_move(did, "btm"))
-    
-    # [v4.2.7] 加入齒輪右鍵選單的「移動自訂格數...」
     sub.addAction(get_msg("move_steps_menu")).triggered.connect(lambda: quick_move_steps(did))
     sub.addSeparator()
-    
     sub.addAction(get_msg("move_parent")).triggered.connect(lambda: quick_change_parent(did))
     sub.addSeparator()
     sub.addAction(get_msg("adv_mgr")).triggered.connect(lambda: DeckManagerDialog(mw).exec())
@@ -649,6 +663,9 @@ def init():
     gui_hooks.deck_browser_will_show_options_menu.append(on_deck_menu)
     gui_hooks.deck_browser_did_render.append(check_auto)
     
+    # [v4.2.8] 綁定原生拖曳攔截 Hook
+    gui_hooks.webview_did_receive_js_message.append(intercept_native_drag)
+    
     _tools_action = QAction(get_msg("adv_mgr"), mw)
     _tools_action.triggered.connect(lambda: DeckManagerDialog(mw).exec())
     mw.form.menuTools.addAction(_tools_action)
@@ -656,11 +673,11 @@ def init():
 gui_hooks.main_window_did_init.append(init)
 """
 
-# MANIFEST 更新至 v4.2.7
+# MANIFEST 更新至 v4.2.8
 MANIFEST = {
     "package": "UltimateDeckReorderPlus",
-    "name": "Deck_Reorder (v4.2.7)",
-    "mod": 1710850027
+    "name": "Deck_Reorder (v4.2.8)",
+    "mod": 1710850028
 }
 
 DEFAULT_CONFIG = {
@@ -678,7 +695,7 @@ def build_addon():
         meta_data = {"name": MANIFEST["name"], "mod": MANIFEST["mod"]}
         zf.writestr('meta.json', json.dumps(meta_data, indent=4, ensure_ascii=False))
         zf.writestr('config.json', json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False))
-    print(f"Build Successful (v4.2.7): {os.path.abspath(filename)}")
+    print(f"Build Successful (v4.2.8): {os.path.abspath(filename)}")
 
 if __name__ == "__main__":
     build_addon()
