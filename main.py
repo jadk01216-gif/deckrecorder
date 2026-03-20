@@ -3,14 +3,16 @@ import zipfile
 import json
 import os
 
-# --- v4.2.4 核心修復與無限位數演算法 ---
+# --- v4.2.6 核心修復與無限位數演算法 ---
 # 1. 演算法 2.0: 導入 Elias Gamma 變體編碼，實現理論上「無限位數」的動態隱形字元排序。
 # 2. 順水推舟法: 完美解決嵌套牌組問題。順應 Anki 原生「改母連動子」的機制，採 Top-Down 即時讀取與覆寫。
 # 3. 修復母牌組拖曳: 客製化 ReorderTreeWidget 嚴格限制僅能進行同層級的兄弟節點重排。
 # 4. 修復快捷移動: 使 quick_move 具備「區塊意識 (Block-aware)」，完整跳躍子牌組群集。
-# 5. [v4.2.2] 動態語系切換: 儲存設定時，立即同步更新 Anki「工具」選單中的管理器名稱。
-# 6. [v4.2.4] 修正 Qt 6.9 拖曳報錯: 支援 event.position().toPoint() 相容寫法。
-# 7. [v4.2.4] 進階管理器擴充: 加入 UI 內的「上移/下移/移至頂端/移至底端/移動自訂格數」按鈕。
+# 5. 動態語系切換: 儲存設定時，立即同步更新 Anki「工具」選單中的管理器名稱。
+# 6. 修正 Qt 6.9 拖曳報錯: 支援 event.position().toPoint() 相容寫法。
+# 7. 進階管理器擴充: 加入 UI 內的「上移/下移/移至頂端/移至底端/移動自訂格數」按鈕。
+# 8. 階層變更支援: 新增「📂 移置母牌組」，允許在編輯器內直接改變牌組的父子關係並同步套用。
+# 9. [v4.2.6] 防呆與全域擴充: 自訂步數超界時會彈出提示；齒輪快捷選單同步加入「📂 移置母牌組...」。
 
 ADDON_CODE = """
 import time
@@ -33,13 +35,14 @@ _tools_action = None
 I18N = {
     "zh-TW": {
         "menu_name": "⇅ 牌組重排",
-        "move_top": "⏫ 移至頂部",
+        "move_top": "⏫ 頂部",
         "move_up": "🔼 上移",
         "move_down": "🔽 下移",
-        "move_btm": "⏬ 移至底部",
+        "move_btm": "⏬ 底部",
+        "move_parent": "📂 移置母牌組...",
         "adv_mgr": "🛠️ 進階管理器...",
         "save": "✅ 儲存並套用",
-        "title": "Deck_Reorder 管理器 (v4.2.4)",
+        "title": "Deck_Reorder 管理器 (v4.2.6)",
         "success": "設定已存檔並套用",
         "settings_group": "自動化與介面設定",
         "lang_label": "介面語言:",
@@ -49,20 +52,27 @@ I18N = {
         "pos_top": "最上面",
         "pos_bottom": "最下面",
         "auto_reorder_label": "發現新牌組時自動處理並重排",
-        "dialog_move_steps": "🔢 移動 N 格...",
+        "dialog_move_steps": "🔢 移動 N 格",
         "dialog_move_prompt_title": "移動格數",
         "dialog_move_prompt_desc": "請輸入要移動的格數\\n(正數往下，負數往上):",
-        "dialog_no_selection": "請先在下方樹狀圖中選取一個牌組！"
+        "dialog_no_selection": "請先在下方樹狀圖中選取一個牌組！",
+        "dialog_parent_btn": "📂 移置母牌組",
+        "dialog_parent_title": "變更母牌組",
+        "dialog_parent_desc": "請選擇新的母牌組:",
+        "dialog_parent_root": "< 最上層 (無) >",
+        "warn_out_of_bounds": "移動步數超出範圍！\\n只能在 0 到 {max_idx} 之間移動。",
+        "warn_cannot_move": "已經在最邊緣，無法再移動了！"
     },
     "en": {
         "menu_name": "⇅ Deck Reorder",
-        "move_top": "⏫ Move to Top",
-        "move_up": "🔼 Move Up",
-        "move_down": "🔽 Move Down",
-        "move_btm": "⏬ Move to Bottom",
+        "move_top": "⏫ Top",
+        "move_up": "🔼 Up",
+        "move_down": "🔽 Down",
+        "move_btm": "⏬ Bottom",
+        "move_parent": "📂 Change Parent...",
         "adv_mgr": "🛠️ Advanced Manager...",
         "save": "✅ Save and Apply",
-        "title": "Deck_Reorder Manager (v4.2.4)",
+        "title": "Deck_Reorder Manager (v4.2.6)",
         "success": "Settings saved and applied",
         "settings_group": "Automation & UI Settings",
         "lang_label": "Language:",
@@ -72,10 +82,16 @@ I18N = {
         "pos_top": "Top",
         "pos_bottom": "Bottom",
         "auto_reorder_label": "Auto-process & reorder new decks",
-        "dialog_move_steps": "🔢 Move N steps...",
+        "dialog_move_steps": "🔢 N Steps",
         "dialog_move_prompt_title": "Move Steps",
         "dialog_move_prompt_desc": "Enter steps to move\\n(Positive for down, Negative for up):",
-        "dialog_no_selection": "Please select a deck from the tree first!"
+        "dialog_no_selection": "Please select a deck from the tree first!",
+        "dialog_parent_btn": "📂 Set Parent",
+        "dialog_parent_title": "Change Parent Deck",
+        "dialog_parent_desc": "Select new parent deck:",
+        "dialog_parent_root": "< Root (None) >",
+        "warn_out_of_bounds": "Steps out of bounds!\\nCan only move between 0 and {max_idx}.",
+        "warn_cannot_move": "Already at the edge, cannot move further!"
     }
 }
 
@@ -87,9 +103,12 @@ def get_current_config():
         if k not in conf: conf[k] = v
     return conf
 
-def get_msg(key, lang_override=None):
+def get_msg(key, lang_override=None, **kwargs):
     lang = lang_override if lang_override else get_current_config().get(CONF_KEY_LANG, "en")
-    return I18N.get(lang, I18N["en"]).get(key, key)
+    msg = I18N.get(lang, I18N["en"]).get(key, key)
+    if kwargs:
+        return msg.format(**kwargs)
+    return msg
 
 def clean_name(name: str) -> str:
     return name.replace(CHAR_0, '').replace(CHAR_1, '')
@@ -106,7 +125,7 @@ def encode_infinite(n: int) -> str:
     suffix = b[1:].replace('0', CHAR_0).replace('1', CHAR_1)
     return prefix + suffix
 
-def apply_order_ultimate(ordered_ids):
+def apply_order_ultimate(ordered_ids, forced_clean_paths=None):
     global _is_reordering
     if not ordered_ids or _is_reordering: return
     _is_reordering = True
@@ -117,7 +136,13 @@ def apply_order_ultimate(ordered_ids):
         all_decks = list(mw.col.decks.all_names_and_ids())
         
         id_to_clean_name = {d.id: clean_name(d.name) for d in all_decks if d.id != 1}
-        clean_path_to_id = {clean_name(d.name): d.id for d in all_decks if d.id != 1}
+        
+        if forced_clean_paths:
+            for did, path in forced_clean_paths.items():
+                if did in id_to_clean_name:
+                    id_to_clean_name[did] = path
+
+        clean_path_to_id = {path: did for did, path in id_to_clean_name.items()}
         
         id_to_new_basename = {}
         for counter, did in enumerate(ordered_ids):
@@ -199,7 +224,6 @@ def quick_move(did, op):
         node_map[d.id] = {'id': d.id, 'c_name': clean_name(d.name), 'children': []}
         
     root_nodes = []
-    
     for d in all_d:
         node = node_map[d.id]
         parts = node['c_name'].split('::')
@@ -249,7 +273,49 @@ def quick_move(did, op):
     apply_order_ultimate(flat_ids)
     tooltip(get_msg("success"))
 
-# 取得滑鼠座標的相容寫法 (Qt5 & Qt6 相容)
+# [v4.2.6] 新增: 從外層齒輪選單快速移置母牌組
+def quick_change_parent(did):
+    lang = get_current_config().get(CONF_KEY_LANG, "en")
+    all_d = sorted([d for d in mw.col.decks.all_names_and_ids() if d.id != 1], key=lambda d: d.name)
+    
+    target_deck_info = next((d for d in all_d if d.id == did), None)
+    if not target_deck_info: return
+    
+    target_clean = clean_name(target_deck_info.name)
+    
+    root_name = get_msg("dialog_parent_root", lang)
+    valid_targets = [(root_name, None)]
+    
+    for d in all_d:
+        c_name = clean_name(d.name)
+        # 不能選自己，也不能選自己的子節點
+        if c_name == target_clean or c_name.startswith(target_clean + "::"):
+            continue
+        valid_targets.append((c_name, c_name))
+        
+    target_names = [t[0] for t in valid_targets]
+    title = get_msg("dialog_parent_title", lang)
+    desc = get_msg("dialog_parent_desc", lang)
+    
+    selected_name, ok = QInputDialog.getItem(mw, title, desc, target_names, 0, False)
+    if not ok: return
+    
+    idx = target_names.index(selected_name)
+    new_parent_path = valid_targets[idx][1]
+    
+    deck_obj = mw.col.decks.get(did)
+    if not deck_obj: return
+    
+    basename = target_clean.split('::')[-1]
+    new_full_path = f"{new_parent_path}::{basename}" if new_parent_path else basename
+    
+    mw.checkpoint("Change Deck Parent")
+    mw.col.decks.rename(deck_obj, new_full_path)
+    mw.col.decks.save()
+    mw.reset()
+    if mw.deckBrowser: mw.deckBrowser.refresh()
+    tooltip(get_msg("success", lang))
+
 def get_event_pos(event):
     if hasattr(event, "position"):
         return event.position().toPoint()
@@ -272,7 +338,6 @@ class ReorderTreeWidget(QTreeWidget):
             return
 
         pos = self.dropIndicatorPosition()
-        
         if pos == QAbstractItemView.DropIndicatorPosition.OnItem:
             event.ignore()
             return
@@ -310,7 +375,7 @@ class DeckManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.conf = get_current_config()
-        self.resize(500, 650)
+        self.resize(600, 650)
         self.setup_ui()
         self.update_dialog_texts()
 
@@ -346,7 +411,6 @@ class DeckManagerDialog(QDialog):
         
         self.settings_group.setLayout(s_lay); self.layout.addWidget(self.settings_group)
         
-        # --- UI 移動按鈕列 ---
         self.btn_layout = QHBoxLayout()
         self.btn_top = QPushButton(); self.btn_top.clicked.connect(lambda: self.move_item_in_tree("top"))
         self.btn_up = QPushButton(); self.btn_up.clicked.connect(lambda: self.move_item_in_tree("up"))
@@ -354,11 +418,15 @@ class DeckManagerDialog(QDialog):
         self.btn_btm = QPushButton(); self.btn_btm.clicked.connect(lambda: self.move_item_in_tree("btm"))
         self.btn_steps = QPushButton(); self.btn_steps.clicked.connect(lambda: self.move_item_in_tree("steps"))
         
+        self.btn_parent = QPushButton()
+        self.btn_parent.clicked.connect(self.change_parent_of_item)
+        
         self.btn_layout.addWidget(self.btn_top)
         self.btn_layout.addWidget(self.btn_up)
         self.btn_layout.addWidget(self.btn_down)
         self.btn_layout.addWidget(self.btn_btm)
         self.btn_layout.addWidget(self.btn_steps)
+        self.btn_layout.addWidget(self.btn_parent)
         self.layout.addLayout(self.btn_layout)
 
         self.tree = ReorderTreeWidget() 
@@ -386,6 +454,7 @@ class DeckManagerDialog(QDialog):
         self.btn_down.setText(get_msg("move_down", lang))
         self.btn_btm.setText(get_msg("move_btm", lang))
         self.btn_steps.setText(get_msg("dialog_move_steps", lang))
+        self.btn_parent.setText(get_msg("dialog_parent_btn", lang))
 
     def load_tree(self):
         self.tree.clear()
@@ -403,7 +472,56 @@ class DeckManagerDialog(QDialog):
             item.setExpanded(True)
             nodes['::'.join(pts)] = item
 
-    # --- 讓按鈕可以操控樹狀圖內的節點排序 ---
+    def change_parent_of_item(self):
+        item = self.tree.currentItem()
+        lang = self.lang_combo.currentData()
+        if not item:
+            QMessageBox.warning(self, "Warning", get_msg("dialog_no_selection", lang))
+            return
+
+        root_name = get_msg("dialog_parent_root", lang)
+        valid_targets = [(root_name, None)]
+
+        def is_descendant(potential_descendant, ancestor):
+            p = potential_descendant.parent()
+            while p:
+                if p == ancestor: return True
+                p = p.parent()
+            return False
+
+        def get_paths(p, current_path):
+            for i in range(p.childCount()):
+                c = p.child(i)
+                if c == item or is_descendant(c, item):
+                    continue
+                name = c.text(0)
+                full_path = f"{current_path}::{name}" if current_path else name
+                valid_targets.append((full_path, c))
+                get_paths(c, full_path)
+
+        get_paths(self.tree.invisibleRootItem(), "")
+
+        target_names = [t[0] for t in valid_targets]
+        title = get_msg("dialog_parent_title", lang)
+        desc = get_msg("dialog_parent_desc", lang)
+        
+        target_name, ok = QInputDialog.getItem(self, title, desc, target_names, 0, False)
+        
+        if ok:
+            idx = target_names.index(target_name)
+            target_item = valid_targets[idx][1]
+            
+            old_parent = item.parent() or self.tree.invisibleRootItem()
+            old_parent.takeChild(old_parent.indexOfChild(item))
+            
+            new_parent = target_item if target_item else self.tree.invisibleRootItem()
+            new_parent.addChild(item)
+            
+            if target_item:
+                target_item.setExpanded(True)
+            self.tree.setCurrentItem(item)
+
+    # [v4.2.6] 補強: 移動超界時的彈窗警告
     def move_item_in_tree(self, direction):
         item = self.tree.currentItem()
         lang = self.lang_combo.currentData()
@@ -418,20 +536,29 @@ class DeckManagerDialog(QDialog):
 
         if direction == "up":
             if idx > 0: new_idx = idx - 1
+            else: QMessageBox.information(self, "Info", get_msg("warn_cannot_move", lang))
         elif direction == "down":
             if idx < count - 1: new_idx = idx + 1
+            else: QMessageBox.information(self, "Info", get_msg("warn_cannot_move", lang))
         elif direction == "top":
-            new_idx = 0
+            if idx == 0: QMessageBox.information(self, "Info", get_msg("warn_cannot_move", lang))
+            else: new_idx = 0
         elif direction == "btm":
-            new_idx = count - 1
+            if idx == count - 1: QMessageBox.information(self, "Info", get_msg("warn_cannot_move", lang))
+            else: new_idx = count - 1
         elif direction == "steps":
             title = get_msg("dialog_move_prompt_title", lang)
             desc = get_msg("dialog_move_prompt_desc", lang)
-            steps, ok = QInputDialog.getInt(self, title, desc, 0, -count, count, 1)
+            # 將上下限設得很寬，讓使用者可以輸入過大的數字來觸發警告
+            steps, ok = QInputDialog.getInt(self, title, desc, 0, -999, 999, 1)
             if ok and steps != 0:
-                new_idx = idx + steps
-                if new_idx < 0: new_idx = 0
-                if new_idx >= count: new_idx = count - 1
+                intended_idx = idx + steps
+                if intended_idx < 0 or intended_idx >= count:
+                    max_idx = count - 1
+                    warn_msg = get_msg("warn_out_of_bounds", lang, max_idx=max_idx)
+                    QMessageBox.warning(self, "Warning", warn_msg)
+                else:
+                    new_idx = intended_idx
 
         if new_idx != idx:
             parent.takeChild(idx)
@@ -448,11 +575,22 @@ class DeckManagerDialog(QDialog):
             _tools_action.setText(get_msg("adv_mgr", final_lang))
             
         ids = []
-        def traverse(p):
+        forced_paths = {}
+        
+        def traverse(p, current_path):
             for i in range(p.childCount()):
-                c = p.child(i); ids.append(c.data(0, Qt.ItemDataRole.UserRole)); traverse(c)
-        traverse(self.tree.invisibleRootItem())
-        apply_order_ultimate(ids)
+                c = p.child(i)
+                did = c.data(0, Qt.ItemDataRole.UserRole)
+                ids.append(did)
+                
+                basename = c.text(0)
+                full_path = f"{current_path}::{basename}" if current_path else basename
+                forced_paths[did] = full_path
+                
+                traverse(c, full_path)
+                
+        traverse(self.tree.invisibleRootItem(), "")
+        apply_order_ultimate(ids, forced_paths)
         tooltip(get_msg("success", final_lang)); self.accept()
 
 def on_deck_menu(menu, did):
@@ -462,6 +600,9 @@ def on_deck_menu(menu, did):
     sub.addAction(get_msg("move_up")).triggered.connect(lambda: quick_move(did, "up"))
     sub.addAction(get_msg("move_down")).triggered.connect(lambda: quick_move(did, "down"))
     sub.addAction(get_msg("move_btm")).triggered.connect(lambda: quick_move(did, "btm"))
+    sub.addSeparator()
+    # [v4.2.6] 新增在齒輪選單內的「移置母牌組」選項
+    sub.addAction(get_msg("move_parent")).triggered.connect(lambda: quick_change_parent(did))
     sub.addSeparator()
     sub.addAction(get_msg("adv_mgr")).triggered.connect(lambda: DeckManagerDialog(mw).exec())
 
@@ -477,11 +618,11 @@ def init():
 gui_hooks.main_window_did_init.append(init)
 """
 
-# MANIFEST 更新至 v4.2.4
+# MANIFEST 更新至 v4.2.6
 MANIFEST = {
     "package": "UltimateDeckReorderPlus",
-    "name": "Deck_Reorder (v4.2.4)",
-    "mod": 1710850024
+    "name": "Deck_Reorder (v4.2.6)",
+    "mod": 1710850026
 }
 
 DEFAULT_CONFIG = {
@@ -499,7 +640,7 @@ def build_addon():
         meta_data = {"name": MANIFEST["name"], "mod": MANIFEST["mod"]}
         zf.writestr('meta.json', json.dumps(meta_data, indent=4, ensure_ascii=False))
         zf.writestr('config.json', json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False))
-    print(f"Build Successful (v4.2.4): {os.path.abspath(filename)}")
+    print(f"Build Successful (v4.2.6): {os.path.abspath(filename)}")
 
 if __name__ == "__main__":
     build_addon()
