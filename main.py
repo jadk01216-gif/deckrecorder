@@ -3,11 +3,12 @@ import zipfile
 import json
 import os
 
-# --- v4.2.1 核心修復與無限位數演算法 ---
+# --- v4.2.2 核心修復與無限位數演算法 ---
 # 1. 演算法 2.0: 導入 Elias Gamma 變體編碼，實現理論上「無限位數」的動態隱形字元排序。
 # 2. 順水推舟法: 完美解決嵌套牌組問題。順應 Anki 原生「改母連動子」的機制，採 Top-Down 即時讀取與覆寫。
 # 3. 修復母牌組拖曳: 客製化 ReorderTreeWidget 嚴格限制僅能進行同層級的兄弟節點重排。
 # 4. 修復快捷移動: 使 quick_move 具備「區塊意識 (Block-aware)」，完整跳躍子牌組群集。
+# 5. [v4.2.2] 動態語系切換: 儲存設定時，立即同步更新 Anki「工具」選單中的管理器名稱。
 
 ADDON_CODE = """
 import time
@@ -25,6 +26,7 @@ CONF_KEY_AUTO = "auto_reorder"
 CONF_KEY_TARGET_DECK = "auto_target_deck"
 
 _is_reordering = False
+_tools_action = None  # 用來儲存工具選單按鈕，以便動態更新語系
 
 I18N = {
     "zh-TW": {
@@ -35,7 +37,7 @@ I18N = {
         "move_btm": "⏬ 移至底部",
         "adv_mgr": "🛠️ 進階管理器...",
         "save": "✅ 儲存並套用",
-        "title": "Deck_Reorder 管理器 (v4.2.1)",
+        "title": "Deck_Reorder 管理器 (v4.2.2)",
         "success": "設定已存檔並套用",
         "settings_group": "自動化與介面設定",
         "lang_label": "介面語言:",
@@ -54,7 +56,7 @@ I18N = {
         "move_btm": "⏬ Move to Bottom",
         "adv_mgr": "🛠️ Advanced Manager...",
         "save": "✅ Save and Apply",
-        "title": "Deck_Reorder Manager (v4.2.1)",
+        "title": "Deck_Reorder Manager (v4.2.2)",
         "success": "Settings saved and applied",
         "settings_group": "Automation & UI Settings",
         "lang_label": "Language:",
@@ -190,7 +192,6 @@ def quick_move(did, op):
         
     root_nodes = []
     
-    # 重建牌組階層樹
     for d in all_d:
         node = node_map[d.id]
         parts = node['c_name'].split('::')
@@ -206,7 +207,6 @@ def quick_move(did, op):
             
     if did not in node_map: return
     
-    # 尋找目標節點的兄弟節點層級
     target_node = node_map[did]
     parts = target_node['c_name'].split('::')
     
@@ -220,7 +220,6 @@ def quick_move(did, op):
     idx = next((i for i, sib in enumerate(siblings) if sib['id'] == did), -1)
     if idx == -1: return
     
-    # 只在同層級的兄弟節點間進行順序交換
     if op == "up" and idx > 0:
         siblings[idx], siblings[idx-1] = siblings[idx-1], siblings[idx]
     elif op == "down" and idx < len(siblings) - 1:
@@ -232,7 +231,6 @@ def quick_move(did, op):
         sib = siblings.pop(idx)
         siblings.append(sib)
         
-    # 平坦化導出新的排序 IDs
     flat_ids = []
     def traverse(nodes):
         for n in nodes:
@@ -261,7 +259,6 @@ class ReorderTreeWidget(QTreeWidget):
 
         pos = self.dropIndicatorPosition()
         
-        # 嚴格禁止「放入(OnItem)」，避免改變母子關係，強制變成插入上方或下方
         if pos == QAbstractItemView.DropIndicatorPosition.OnItem:
             event.ignore()
             return
@@ -269,7 +266,6 @@ class ReorderTreeWidget(QTreeWidget):
         intended_parent = target_item.parent() if target_item else self.invisibleRootItem()
         drag_parent = dragged_item.parent() if dragged_item else self.invisibleRootItem()
 
-        # 僅允許在相同的母節點內重排
         if drag_parent != intended_parent:
             event.ignore()
         else:
@@ -336,7 +332,6 @@ class DeckManagerDialog(QDialog):
         
         self.settings_group.setLayout(s_lay); self.layout.addWidget(self.settings_group)
         
-        # 使用客製化的 ReorderTreeWidget 取代原始的 QTreeWidget
         self.tree = ReorderTreeWidget() 
         self.layout.addWidget(self.tree)
         
@@ -357,23 +352,16 @@ class DeckManagerDialog(QDialog):
         self.pos_combo.setItemText(1, get_msg("pos_bottom", lang))
         self.btn_save.setText(get_msg("save", lang))
 
-    def load_tree(self):
-        self.tree.clear()
-        decks = sorted([d for d in mw.col.decks.all_names_and_ids() if d.id != 1], key=lambda d: d.name)
-        nodes = {}
-        for d in decks:
-            pts = clean_name(d.name).split('::')
-            parent = self.tree.invisibleRootItem()
-            if len(pts) > 1:
-                pk = '::'.join(pts[:-1])
-                if pk in nodes: parent = nodes[pk]
-            item = QTreeWidgetItem(parent); item.setText(0, pts[-1]); item.setData(0, Qt.ItemDataRole.UserRole, d.id)
-            item.setExpanded(True); nodes['::'.join(pts)] = item
-
     def save(self):
         final_lang = self.lang_combo.currentData()
         new_conf = {CONF_KEY_LANG: final_lang, CONF_KEY_AUTO: self.auto_cb.isChecked(), CONF_KEY_TARGET_DECK: self.target_combo.currentData(), CONF_KEY_POS: self.pos_combo.currentData()}
         mw.addonManager.writeConfig(__name__, new_conf)
+        
+        # [v4.2.2 修復] 即時更新 Anki 「工具」選單中的名稱
+        global _tools_action
+        if _tools_action is not None:
+            _tools_action.setText(get_msg("adv_mgr", final_lang))
+            
         ids = []
         def traverse(p):
             for i in range(p.childCount()):
@@ -393,20 +381,23 @@ def on_deck_menu(menu, did):
     sub.addAction(get_msg("adv_mgr")).triggered.connect(lambda: DeckManagerDialog(mw).exec())
 
 def init():
+    global _tools_action
     gui_hooks.deck_browser_will_show_options_menu.append(on_deck_menu)
     gui_hooks.deck_browser_did_render.append(check_auto)
-    action = QAction(get_msg("adv_mgr"), mw)
-    action.triggered.connect(lambda: DeckManagerDialog(mw).exec())
-    mw.form.menuTools.addAction(action)
+    
+    # 建立工具選單按鈕，並儲存至全域變數
+    _tools_action = QAction(get_msg("adv_mgr"), mw)
+    _tools_action.triggered.connect(lambda: DeckManagerDialog(mw).exec())
+    mw.form.menuTools.addAction(_tools_action)
 
 gui_hooks.main_window_did_init.append(init)
 """
 
-# MANIFEST 更新至 v4.2.1
+# MANIFEST 更新至 v4.2.2
 MANIFEST = {
     "package": "UltimateDeckReorderPlus",
-    "name": "Deck_Reorder (v4.2.1)",
-    "mod": 1710850021
+    "name": "Deck_Reorder (v4.2.2)",
+    "mod": 1710850022
 }
 
 DEFAULT_CONFIG = {
@@ -424,7 +415,7 @@ def build_addon():
         meta_data = {"name": MANIFEST["name"], "mod": MANIFEST["mod"]}
         zf.writestr('meta.json', json.dumps(meta_data, indent=4, ensure_ascii=False))
         zf.writestr('config.json', json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False))
-    print(f"Build Successful (v4.2.1): {os.path.abspath(filename)}")
+    print(f"Build Successful (v4.2.2): {os.path.abspath(filename)}")
 
 if __name__ == "__main__":
     build_addon()
