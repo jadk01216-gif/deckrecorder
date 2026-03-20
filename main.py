@@ -3,10 +3,9 @@ import zipfile
 import json
 import os
 
-# --- v4.0 終極修復與新功能 ---
-# 1. 修復存檔失敗：在 build_addon 中強制寫入 config.json，滿足 Anki 的官方 API 需求。
-# 2. 新增功能：可設定新牌組預設要放入哪個「父牌組 (Target Deck)」底下。
-# 3. 邏輯優化：修復若手動建立子牌組時，無法正確辨識為新牌組的 Bug。
+# --- v4.1 核心修復：嵌套牌組排序與路徑同步 ---
+# 1. 修正嵌套牌組 (Deck::SubDeck) 在移動時，因父路徑變更導致的 ID 查找失敗。
+# 2. 優化層級處理邏輯，確保父牌組優先獲得排序前綴，子牌組正確繼承。
 
 ADDON_CODE = """
 import time
@@ -25,7 +24,6 @@ CONF_KEY_TARGET_DECK = "auto_target_deck"
 
 _is_reordering = False
 
-# --- I18N ---
 I18N = {
     "zh-TW": {
         "menu_name": "⇅ 牌組重排",
@@ -35,10 +33,10 @@ I18N = {
         "move_btm": "⏬ 移至底部",
         "adv_mgr": "🛠️ 進階管理器...",
         "save": "✅ 儲存並套用",
-        "title": "進階排序管理器 (v4.0)",
+        "title": "進階排序管理器 (v4.1)",
         "success": "設定已存檔並套用",
         "settings_group": "自動化與介面設定",
-        "lang_label": "介面語言 (Language):",
+        "lang_label": "介面語言:",
         "new_deck_label": "新牌組排序位置:",
         "target_deck_label": "預設放入的父牌組:",
         "target_root": "< 最上層 (無) >",
@@ -54,10 +52,10 @@ I18N = {
         "move_btm": "⏬ Move to Bottom",
         "adv_mgr": "🛠️ Advanced Manager...",
         "save": "✅ Save and Apply",
-        "title": "Advanced Deck Manager (v4.0)",
+        "title": "Advanced Deck Manager (v4.1)",
         "success": "Settings saved and applied",
         "settings_group": "Automation & UI Settings",
-        "lang_label": "Interface Language:",
+        "lang_label": "Language:",
         "new_deck_label": "New Deck Position:",
         "target_deck_label": "Default Parent Deck:",
         "target_root": "< Root (None) >",
@@ -69,12 +67,10 @@ I18N = {
 
 def get_current_config():
     conf = mw.addonManager.getConfig(__name__)
-    if not isinstance(conf, dict):
-        conf = {}
-    if CONF_KEY_LANG not in conf: conf[CONF_KEY_LANG] = "en"
-    if CONF_KEY_POS not in conf: conf[CONF_KEY_POS] = "top"
-    if CONF_KEY_AUTO not in conf: conf[CONF_KEY_AUTO] = True
-    if CONF_KEY_TARGET_DECK not in conf: conf[CONF_KEY_TARGET_DECK] = ""
+    if not isinstance(conf, dict): conf = {}
+    defaults = {CONF_KEY_LANG: "en", CONF_KEY_POS: "top", CONF_KEY_AUTO: True, CONF_KEY_TARGET_DECK: ""}
+    for k, v in defaults.items():
+        if k not in conf: conf[k] = v
     return conf
 
 def get_msg(key, lang_override=None):
@@ -85,7 +81,6 @@ def clean_name(name: str) -> str:
     return name.replace(CHAR_0, '').replace(CHAR_1, '')
 
 def is_unsorted(name: str) -> bool:
-    # 檢查最後一個層級是否有零寬字元 (確保子牌組也能正確判定為新牌組)
     final_part = name.split('::')[-1]
     return CHAR_0 not in final_part and CHAR_1 not in final_part
 
@@ -96,10 +91,12 @@ def apply_order_ultimate(ordered_ids):
     try:
         mw.checkpoint("Deck Reorder")
         mw.col.modSchema(check=False)
-        all_decks = list(mw.col.decks.all_names_and_ids())
-        id_to_base = {d.id: clean_name(d.name) for d in all_decks if d.id != 1}
-        clean_path_to_id = {clean_name(d.name): d.id for d in all_decks if d.id != 1}
         
+        # 1. 取得目前所有牌組的乾淨名稱映射
+        all_decks = list(mw.col.decks.all_names_and_ids())
+        id_to_clean_full = {d.id: clean_name(d.name) for d in all_decks if d.id != 1}
+        
+        # 2. 暫時重命名，避免重名衝突
         temp_root = f"__REORDER_{int(time.time())}__"
         for d in all_decks:
             if d.id == 1: continue
@@ -107,31 +104,38 @@ def apply_order_ultimate(ordered_ids):
             if deck: mw.col.decks.rename(deck, f"{temp_root}_{d.id}")
         mw.col.decks.save()
 
-        id_to_new_single_label = {}
+        # 3. 生成「單層級」的排序標籤
+        id_to_sort_label = {}
         for counter, did in enumerate(ordered_ids):
-            if did not in id_to_base: continue
-            base = id_to_base[did]
-            single_name = base.split('::')[-1]
+            if did not in id_to_clean_full: continue
             prefix = format(counter, '016b').replace('0', CHAR_0).replace('1', CHAR_1)
-            id_to_new_single_label[did] = prefix + single_name
+            single_name = id_to_clean_full[did].split('::')[-1]
+            id_to_sort_label[did] = prefix + single_name
 
-        tasks = []
-        for did in ordered_ids:
-            if did not in id_to_base: continue
-            parts = id_to_base[did].split('::')
+        # 4. 重新建立完整路徑映射
+        final_tasks = []
+        sorted_dids = sorted(id_to_clean_full.keys(), key=lambda did: id_to_clean_full[did].count('::'))
+        clean_path_to_id = {v: k for k, v in id_to_clean_full.items()}
+
+        for did in sorted_dids:
+            parts = id_to_clean_full[did].split('::')
             new_path_parts = []
-            curr = ""
             for p in parts:
-                curr = (curr + "::" + p) if curr else p
-                layer_id = clean_path_to_id.get(curr)
-                new_path_parts.append(id_to_new_single_label.get(layer_id, p))
-            tasks.append((did, '::'.join(new_path_parts)))
+                original_layer_path = "::".join(parts[:len(new_path_parts)+1])
+                layer_id = clean_path_to_id.get(original_layer_path)
+                label = id_to_sort_label.get(layer_id, p)
+                new_path_parts.append(label)
+            
+            final_path = "::".join(new_path_parts)
+            final_tasks.append((did, final_path))
 
-        tasks.sort(key=lambda x: x[1].count('::'))
-        for did, final_name in tasks:
-            tmp = f"{temp_root}_{did}"
-            did_now = mw.col.decks.id_for_name(tmp)
-            if did_now: mw.col.decks.rename(mw.col.decks.get(did_now), final_name)
+        # 5. 按照路徑深度執行重命名
+        final_tasks.sort(key=lambda x: x[1].count('::'))
+        for did, final_name in final_tasks:
+            tmp_name = f"{temp_root}_{did}"
+            deck_obj = mw.col.decks.by_name(tmp_name)
+            if deck_obj:
+                mw.col.decks.rename(deck_obj, final_name)
 
         mw.col.decks.save()
         mw.reset()
@@ -148,27 +152,19 @@ def check_auto(deck_browser=None):
     new_d = [d for d in all_d if is_unsorted(d.name)]
     if not new_d: return
     
-    # 處理「預設放入的父牌組」
     target_deck_clean = conf.get(CONF_KEY_TARGET_DECK, "")
-    moved_any = False
     if target_deck_clean:
-        clean_names = {clean_name(d.name): d.name for d in all_d}
-        if target_deck_clean in clean_names:
-            target_raw = clean_names[target_deck_clean]
+        clean_names_to_raw = {clean_name(d.name): d.name for d in all_d}
+        if target_deck_clean in clean_names_to_raw:
+            target_raw = clean_names_to_raw[target_deck_clean]
             for d in new_d:
                 base_clean = clean_name(d.name)
-                # 只有當牌組是建在最上層時(沒有 '::')，才把它移進目標父牌組
                 if '::' not in base_clean:
                     deck_obj = mw.col.decks.get(d.id)
-                    new_full = f"{target_raw}::{base_clean}"
-                    mw.col.decks.rename(deck_obj, new_full)
-                    moved_any = True
-            
-            if moved_any:
-                mw.col.decks.save()
-                # 重新獲取牌組資料，因為名字已經變更了
-                all_d = [d for d in mw.col.decks.all_names_and_ids() if d.id != 1]
-                new_d = [d for d in all_d if is_unsorted(d.name)]
+                    mw.col.decks.rename(deck_obj, f"{target_raw}::{base_clean}")
+            mw.col.decks.save()
+            all_d = [d for d in mw.col.decks.all_names_and_ids() if d.id != 1]
+            new_d = [d for d in all_d if is_unsorted(d.name)]
 
     ids = [d.id for d in sorted(all_d, key=lambda d: d.name)]
     n_ids = [d.id for d in new_d]
@@ -194,77 +190,46 @@ class DeckManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.conf = get_current_config()
-        self.setFixedWidth(460)
-        self.setFixedHeight(580) # 稍微加高以容納新選項
+        self.setFixedWidth(480)
+        self.setFixedHeight(600)
         self.setup_ui()
         self.update_dialog_texts()
 
     def setup_ui(self):
         self.layout = QVBoxLayout(self)
-
         self.settings_group = QGroupBox()
         s_lay = QVBoxLayout()
         
-        # 1. 語言設定
-        lang_row = QHBoxLayout()
-        self.lang_label = QLabel()
-        lang_row.addWidget(self.lang_label)
-        self.lang_combo = QComboBox()
-        self.lang_combo.addItem("English", "en")
-        self.lang_combo.addItem("繁體中文", "zh-TW")
+        l_row = QHBoxLayout(); self.lang_label = QLabel(); l_row.addWidget(self.lang_label)
+        self.lang_combo = QComboBox(); self.lang_combo.addItem("English", "en"); self.lang_combo.addItem("繁體中文", "zh-TW")
         idx_lang = self.lang_combo.findData(self.conf.get(CONF_KEY_LANG, "en"))
         self.lang_combo.setCurrentIndex(idx_lang if idx_lang != -1 else 0)
         self.lang_combo.currentIndexChanged.connect(self.update_dialog_texts)
-        lang_row.addWidget(self.lang_combo)
-        s_lay.addLayout(lang_row)
+        l_row.addWidget(self.lang_combo); s_lay.addLayout(l_row)
 
-        # 2. 自動重排勾選框
-        self.auto_cb = QCheckBox()
-        self.auto_cb.setChecked(self.conf.get(CONF_KEY_AUTO, True))
+        self.auto_cb = QCheckBox(); self.auto_cb.setChecked(self.conf.get(CONF_KEY_AUTO, True))
         s_lay.addWidget(self.auto_cb)
         
-        # 3. 預設父牌組選擇
-        target_row = QHBoxLayout()
-        self.target_deck_label = QLabel()
-        target_row.addWidget(self.target_deck_label)
+        t_row = QHBoxLayout(); self.target_deck_label = QLabel(); t_row.addWidget(self.target_deck_label)
         self.target_combo = QComboBox()
-        
-        self.target_combo.addItem(get_msg("target_root", self.lang_combo.currentData()), "")
+        self.target_combo.addItem("", "")
         decks_clean = sorted([clean_name(d.name) for d in mw.col.decks.all_names_and_ids() if d.id != 1])
-        for d_name in decks_clean:
-            self.target_combo.addItem(d_name, d_name)
-            
+        for d_name in decks_clean: self.target_combo.addItem(d_name, d_name)
         idx_target = self.target_combo.findData(self.conf.get(CONF_KEY_TARGET_DECK, ""))
         self.target_combo.setCurrentIndex(idx_target if idx_target != -1 else 0)
-        target_row.addWidget(self.target_combo)
-        s_lay.addLayout(target_row)
+        t_row.addWidget(self.target_combo); s_lay.addLayout(t_row)
 
-        # 4. 新牌組頂部/底部選擇
-        row = QHBoxLayout()
-        self.new_deck_label = QLabel()
-        row.addWidget(self.new_deck_label)
-        self.pos_combo = QComboBox()
-        self.pos_combo.addItem("", "top")
-        self.pos_combo.addItem("", "bottom")
+        p_row = QHBoxLayout(); self.new_deck_label = QLabel(); p_row.addWidget(self.new_deck_label)
+        self.pos_combo = QComboBox(); self.pos_combo.addItem("", "top"); self.pos_combo.addItem("", "bottom")
         idx_pos = self.pos_combo.findData(self.conf.get(CONF_KEY_POS, "top"))
         self.pos_combo.setCurrentIndex(idx_pos if idx_pos != -1 else 0)
-        row.addWidget(self.pos_combo)
-        s_lay.addLayout(row)
+        p_row.addWidget(self.pos_combo); s_lay.addLayout(p_row)
         
-        self.settings_group.setLayout(s_lay)
-        self.layout.addWidget(self.settings_group)
-
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.settings_group.setLayout(s_lay); self.layout.addWidget(self.settings_group)
+        self.tree = QTreeWidget(); self.tree.setHeaderHidden(True); self.tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.layout.addWidget(self.tree)
-        
-        self.btn_save = QPushButton()
-        self.btn_save.setFixedHeight(50)
-        self.btn_save.setStyleSheet("font-weight: bold; background-color: #2ecc71; color: white; border-radius: 6px;")
-        self.btn_save.clicked.connect(self.save)
-        self.layout.addWidget(self.btn_save)
-        
+        self.btn_save = QPushButton(); self.btn_save.setFixedHeight(45); self.btn_save.setStyleSheet("background: #27ae60; color: white; font-weight: bold;")
+        self.btn_save.clicked.connect(self.save); self.layout.addWidget(self.btn_save)
         self.load_tree()
 
     def update_dialog_texts(self):
@@ -290,39 +255,20 @@ class DeckManagerDialog(QDialog):
             if len(pts) > 1:
                 pk = '::'.join(pts[:-1])
                 if pk in nodes: parent = nodes[pk]
-            item = QTreeWidgetItem(parent)
-            item.setText(0, pts[-1])
-            item.setData(0, Qt.ItemDataRole.UserRole, d.id)
-            item.setExpanded(True)
-            nodes['::'.join(pts)] = item
+            item = QTreeWidgetItem(parent); item.setText(0, pts[-1]); item.setData(0, Qt.ItemDataRole.UserRole, d.id)
+            item.setExpanded(True); nodes['::'.join(pts)] = item
 
     def save(self):
         final_lang = self.lang_combo.currentData()
-        new_conf = {
-            CONF_KEY_LANG: final_lang,
-            CONF_KEY_AUTO: self.auto_cb.isChecked(), 
-            CONF_KEY_TARGET_DECK: self.target_combo.currentData(),
-            CONF_KEY_POS: self.pos_combo.currentData()
-        }
-        
-        # 寫入設定到 meta.json
+        new_conf = {CONF_KEY_LANG: final_lang, CONF_KEY_AUTO: self.auto_cb.isChecked(), CONF_KEY_TARGET_DECK: self.target_combo.currentData(), CONF_KEY_POS: self.pos_combo.currentData()}
         mw.addonManager.writeConfig(__name__, new_conf)
-        
-        for action in mw.form.menuTools.actions():
-            if action.property("id") == "reorder_mgr_action":
-                action.setText(get_msg("adv_mgr", final_lang))
-                
         ids = []
         def traverse(p):
             for i in range(p.childCount()):
-                c = p.child(i)
-                ids.append(c.data(0, Qt.ItemDataRole.UserRole))
-                traverse(c)
+                c = p.child(i); ids.append(c.data(0, Qt.ItemDataRole.UserRole)); traverse(c)
         traverse(self.tree.invisibleRootItem())
         apply_order_ultimate(ids)
-        
-        tooltip(get_msg("success", final_lang))
-        self.accept()
+        tooltip(get_msg("success", final_lang)); self.accept()
 
 def on_deck_menu(menu, did):
     if did == 1: return
@@ -337,9 +283,7 @@ def on_deck_menu(menu, did):
 def init():
     gui_hooks.deck_browser_will_show_options_menu.append(on_deck_menu)
     gui_hooks.deck_browser_did_render.append(check_auto)
-    
     action = QAction(get_msg("adv_mgr"), mw)
-    action.setProperty("id", "reorder_mgr_action")
     action.triggered.connect(lambda: DeckManagerDialog(mw).exec())
     mw.form.menuTools.addAction(action)
 
@@ -348,8 +292,8 @@ gui_hooks.main_window_did_init.append(init)
 
 MANIFEST = {
     "package": "UltimateDeckReorderPlus",
-    "name": "Ultimate Deck Reorder (v4.0)",
-    "mod": 1710850008
+    "name": "Ultimate Deck Reorder (v4.1)",
+    "mod": 1710850009
 }
 
 DEFAULT_CONFIG = {
@@ -364,10 +308,8 @@ def build_addon():
     with zipfile.ZipFile(filename, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr('__init__.py', ADDON_CODE.strip())
         zf.writestr('manifest.json', json.dumps(MANIFEST, indent=4, ensure_ascii=False))
-        # 【最關鍵的修復】必須在插件內打包 config.json，否則 Anki 不會啟動 Config 寫入機制！
         zf.writestr('config.json', json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False))
-        
-    print(f"Build Successful: {os.path.abspath(filename)}")
+    print(f"Build Successful (v4.1): {os.path.abspath(filename)}")
 
 if __name__ == "__main__":
     build_addon()
