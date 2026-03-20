@@ -3,13 +3,14 @@ import zipfile
 import json
 import os
 
-# --- v4.2.3 核心修復與無限位數演算法 ---
+# --- v4.2.4 核心修復與無限位數演算法 ---
 # 1. 演算法 2.0: 導入 Elias Gamma 變體編碼，實現理論上「無限位數」的動態隱形字元排序。
 # 2. 順水推舟法: 完美解決嵌套牌組問題。順應 Anki 原生「改母連動子」的機制，採 Top-Down 即時讀取與覆寫。
 # 3. 修復母牌組拖曳: 客製化 ReorderTreeWidget 嚴格限制僅能進行同層級的兄弟節點重排。
 # 4. 修復快捷移動: 使 quick_move 具備「區塊意識 (Block-aware)」，完整跳躍子牌組群集。
 # 5. [v4.2.2] 動態語系切換: 儲存設定時，立即同步更新 Anki「工具」選單中的管理器名稱。
-# 6. [v4.2.3] 臭蟲修復: 補回遺失的 load_tree 渲染函式。
+# 6. [v4.2.4] 修正 Qt 6.9 拖曳報錯: 支援 event.position().toPoint() 相容寫法。
+# 7. [v4.2.4] 進階管理器擴充: 加入 UI 內的「上移/下移/移至頂端/移至底端/移動自訂格數」按鈕。
 
 ADDON_CODE = """
 import time
@@ -38,7 +39,7 @@ I18N = {
         "move_btm": "⏬ 移至底部",
         "adv_mgr": "🛠️ 進階管理器...",
         "save": "✅ 儲存並套用",
-        "title": "Deck_Reorder 管理器 (v4.2.3)",
+        "title": "Deck_Reorder 管理器 (v4.2.4)",
         "success": "設定已存檔並套用",
         "settings_group": "自動化與介面設定",
         "lang_label": "介面語言:",
@@ -47,7 +48,11 @@ I18N = {
         "target_root": "< 最上層 (無) >",
         "pos_top": "最上面",
         "pos_bottom": "最下面",
-        "auto_reorder_label": "發現新牌組時自動處理並重排"
+        "auto_reorder_label": "發現新牌組時自動處理並重排",
+        "dialog_move_steps": "🔢 移動 N 格...",
+        "dialog_move_prompt_title": "移動格數",
+        "dialog_move_prompt_desc": "請輸入要移動的格數\\n(正數往下，負數往上):",
+        "dialog_no_selection": "請先在下方樹狀圖中選取一個牌組！"
     },
     "en": {
         "menu_name": "⇅ Deck Reorder",
@@ -57,7 +62,7 @@ I18N = {
         "move_btm": "⏬ Move to Bottom",
         "adv_mgr": "🛠️ Advanced Manager...",
         "save": "✅ Save and Apply",
-        "title": "Deck_Reorder Manager (v4.2.3)",
+        "title": "Deck_Reorder Manager (v4.2.4)",
         "success": "Settings saved and applied",
         "settings_group": "Automation & UI Settings",
         "lang_label": "Language:",
@@ -66,7 +71,11 @@ I18N = {
         "target_root": "< Root (None) >",
         "pos_top": "Top",
         "pos_bottom": "Bottom",
-        "auto_reorder_label": "Auto-process & reorder new decks"
+        "auto_reorder_label": "Auto-process & reorder new decks",
+        "dialog_move_steps": "🔢 Move N steps...",
+        "dialog_move_prompt_title": "Move Steps",
+        "dialog_move_prompt_desc": "Enter steps to move\\n(Positive for down, Negative for up):",
+        "dialog_no_selection": "Please select a deck from the tree first!"
     }
 }
 
@@ -240,6 +249,12 @@ def quick_move(did, op):
     apply_order_ultimate(flat_ids)
     tooltip(get_msg("success"))
 
+# 取得滑鼠座標的相容寫法 (Qt5 & Qt6 相容)
+def get_event_pos(event):
+    if hasattr(event, "position"):
+        return event.position().toPoint()
+    return event.pos()
+
 class ReorderTreeWidget(QTreeWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -250,8 +265,9 @@ class ReorderTreeWidget(QTreeWidget):
 
     def dragMoveEvent(self, event):
         super().dragMoveEvent(event)
+        event_pos = get_event_pos(event)
         dragged_item = self.currentItem()
-        target_item = self.itemAt(event.pos())
+        target_item = self.itemAt(event_pos)
         if not dragged_item or not target_item:
             return
 
@@ -270,8 +286,9 @@ class ReorderTreeWidget(QTreeWidget):
             event.accept()
 
     def dropEvent(self, event):
+        event_pos = get_event_pos(event)
         dragged_item = self.currentItem()
-        target_item = self.itemAt(event.pos())
+        target_item = self.itemAt(event_pos)
         if not dragged_item or not target_item:
             return super().dropEvent(event)
 
@@ -293,8 +310,7 @@ class DeckManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.conf = get_current_config()
-        self.setFixedWidth(480)
-        self.setFixedHeight(600)
+        self.resize(500, 650)
         self.setup_ui()
         self.update_dialog_texts()
 
@@ -330,6 +346,21 @@ class DeckManagerDialog(QDialog):
         
         self.settings_group.setLayout(s_lay); self.layout.addWidget(self.settings_group)
         
+        # --- UI 移動按鈕列 ---
+        self.btn_layout = QHBoxLayout()
+        self.btn_top = QPushButton(); self.btn_top.clicked.connect(lambda: self.move_item_in_tree("top"))
+        self.btn_up = QPushButton(); self.btn_up.clicked.connect(lambda: self.move_item_in_tree("up"))
+        self.btn_down = QPushButton(); self.btn_down.clicked.connect(lambda: self.move_item_in_tree("down"))
+        self.btn_btm = QPushButton(); self.btn_btm.clicked.connect(lambda: self.move_item_in_tree("btm"))
+        self.btn_steps = QPushButton(); self.btn_steps.clicked.connect(lambda: self.move_item_in_tree("steps"))
+        
+        self.btn_layout.addWidget(self.btn_top)
+        self.btn_layout.addWidget(self.btn_up)
+        self.btn_layout.addWidget(self.btn_down)
+        self.btn_layout.addWidget(self.btn_btm)
+        self.btn_layout.addWidget(self.btn_steps)
+        self.layout.addLayout(self.btn_layout)
+
         self.tree = ReorderTreeWidget() 
         self.layout.addWidget(self.tree)
         
@@ -349,8 +380,13 @@ class DeckManagerDialog(QDialog):
         self.pos_combo.setItemText(0, get_msg("pos_top", lang))
         self.pos_combo.setItemText(1, get_msg("pos_bottom", lang))
         self.btn_save.setText(get_msg("save", lang))
+        
+        self.btn_top.setText(get_msg("move_top", lang))
+        self.btn_up.setText(get_msg("move_up", lang))
+        self.btn_down.setText(get_msg("move_down", lang))
+        self.btn_btm.setText(get_msg("move_btm", lang))
+        self.btn_steps.setText(get_msg("dialog_move_steps", lang))
 
-    # [v4.2.3 修復] 補回在精簡代碼時不小心刪除的樹狀圖渲染功能
     def load_tree(self):
         self.tree.clear()
         decks = sorted([d for d in mw.col.decks.all_names_and_ids() if d.id != 1], key=lambda d: d.name)
@@ -366,6 +402,41 @@ class DeckManagerDialog(QDialog):
             item.setData(0, Qt.ItemDataRole.UserRole, d.id)
             item.setExpanded(True)
             nodes['::'.join(pts)] = item
+
+    # --- 讓按鈕可以操控樹狀圖內的節點排序 ---
+    def move_item_in_tree(self, direction):
+        item = self.tree.currentItem()
+        lang = self.lang_combo.currentData()
+        if not item:
+            QMessageBox.warning(self, "Warning", get_msg("dialog_no_selection", lang))
+            return
+
+        parent = item.parent() or self.tree.invisibleRootItem()
+        idx = parent.indexOfChild(item)
+        count = parent.childCount()
+        new_idx = idx
+
+        if direction == "up":
+            if idx > 0: new_idx = idx - 1
+        elif direction == "down":
+            if idx < count - 1: new_idx = idx + 1
+        elif direction == "top":
+            new_idx = 0
+        elif direction == "btm":
+            new_idx = count - 1
+        elif direction == "steps":
+            title = get_msg("dialog_move_prompt_title", lang)
+            desc = get_msg("dialog_move_prompt_desc", lang)
+            steps, ok = QInputDialog.getInt(self, title, desc, 0, -count, count, 1)
+            if ok and steps != 0:
+                new_idx = idx + steps
+                if new_idx < 0: new_idx = 0
+                if new_idx >= count: new_idx = count - 1
+
+        if new_idx != idx:
+            parent.takeChild(idx)
+            parent.insertChild(new_idx, item)
+            self.tree.setCurrentItem(item)
 
     def save(self):
         final_lang = self.lang_combo.currentData()
@@ -406,11 +477,11 @@ def init():
 gui_hooks.main_window_did_init.append(init)
 """
 
-# MANIFEST 更新至 v4.2.3
+# MANIFEST 更新至 v4.2.4
 MANIFEST = {
     "package": "UltimateDeckReorderPlus",
-    "name": "Deck_Reorder (v4.2.3)",
-    "mod": 1710850023
+    "name": "Deck_Reorder (v4.2.4)",
+    "mod": 1710850024
 }
 
 DEFAULT_CONFIG = {
@@ -428,7 +499,7 @@ def build_addon():
         meta_data = {"name": MANIFEST["name"], "mod": MANIFEST["mod"]}
         zf.writestr('meta.json', json.dumps(meta_data, indent=4, ensure_ascii=False))
         zf.writestr('config.json', json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False))
-    print(f"Build Successful (v4.2.3): {os.path.abspath(filename)}")
+    print(f"Build Successful (v4.2.4): {os.path.abspath(filename)}")
 
 if __name__ == "__main__":
     build_addon()
