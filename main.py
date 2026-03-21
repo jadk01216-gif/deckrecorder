@@ -3,7 +3,7 @@ import zipfile
 import json
 import os
 
-# --- v4.3.9 完美自由拖曳版 ---
+# --- v4.4.0 完美自由拖曳版 ---
 # 1. 演算法 2.0: 導入 Elias Gamma 編碼，實現「無限位數」的動態隱形字元排序。
 # 2. 順水推舟法: 完美解決嵌套牌組問題，Top-Down 即時讀取與覆寫。
 # 3. 智能拖曳攔截: 允許原生放入子牌組，但攔截獨立拖曳重排，並顯示開發中提示。
@@ -14,6 +14,7 @@ import os
 # 8. [v4.3.9] 進階管理器新增藍線/藍框拖曳提示（含最上/最下層邊界）、復原 / 重做功能。首頁不受影響。
 # 9. [v4.3.9] 進階管理器新增重新命名與刪除功能；刪除在儲存時才真正寫入 Anki。
 # 10. [v4.3.9] 移除「自動處理並重排」勾選框；新增「Anki 預設」選項至排序位置與父牌組設定。
+# 11. [v4.4.0] 右鍵選單智能停用：已在頂部時停用「頂部」/「上移」，已在底部時停用「底部」/「下移」，已在最上層時停用「移出母牌組」；無法移動時顯示 tooltip 提示。
 
 ADDON_CODE = """
 from aqt import mw
@@ -43,7 +44,7 @@ I18N = {
         "adv_mgr": "🛠️ 進階管理器...",
         "save": "✅ 儲存並套用",
         "help_btn": "📖 用法教學",
-        "title": "Deck_Reorder 管理器 (v4.3.9)",
+        "title": "Deck_Reorder 管理器 (v4.4.0)",
         "success": "設定已存檔並套用",
         "settings_group": "自動化與介面設定",
         "lang_label": "介面語言:",
@@ -96,7 +97,7 @@ I18N = {
         "adv_mgr": "🛠️ Advanced Manager...",
         "save": "✅ Save and Apply",
         "help_btn": "📖 Help / Tutorial",
-        "title": "Deck_Reorder Manager (v4.3.9)",
+        "title": "Deck_Reorder Manager (v4.4.0)",
         "success": "Settings saved and applied",
         "settings_group": "Automation & UI Settings",
         "lang_label": "Language:",
@@ -285,15 +286,19 @@ def quick_move(did, op):
     idx = next((i for i, sib in enumerate(siblings) if sib['id'] == did), -1)
     if idx == -1: return
     
+    moved = False
     if op == "up" and idx > 0:
-        siblings[idx], siblings[idx-1] = siblings[idx-1], siblings[idx]
+        siblings[idx], siblings[idx-1] = siblings[idx-1], siblings[idx]; moved = True
     elif op == "down" and idx < len(siblings) - 1:
-        siblings[idx], siblings[idx+1] = siblings[idx+1], siblings[idx]
+        siblings[idx], siblings[idx+1] = siblings[idx+1], siblings[idx]; moved = True
     elif op == "top" and idx > 0:
-        sib = siblings.pop(idx); siblings.insert(0, sib)
+        sib = siblings.pop(idx); siblings.insert(0, sib); moved = True
     elif op == "btm" and idx < len(siblings) - 1:
-        sib = siblings.pop(idx); siblings.append(sib)
-        
+        sib = siblings.pop(idx); siblings.append(sib); moved = True
+
+    if not moved:
+        tooltip(get_msg("warn_cannot_move")); return
+
     flat_ids = []
     def traverse(nodes):
         for n in nodes:
@@ -1079,15 +1084,53 @@ class DeckManagerDialog(QDialog):
 
 def on_deck_menu(menu, did):
     if did == 1: return
+
+    # 計算該牌組在同層的位置
+    all_d = sorted([d for d in mw.col.decks.all_names_and_ids() if d.id != 1], key=lambda d: d.name)
+    node_map = {}
+    for d in all_d:
+        node_map[d.id] = {'id': d.id, 'c_name': clean_name(d.name), 'children': []}
+    root_nodes = []
+    for d in all_d:
+        node = node_map[d.id]
+        parts = node['c_name'].split('::')
+        if len(parts) > 1:
+            parent_path = '::'.join(parts[:-1])
+            parent_node = next((n for n in node_map.values() if n['c_name'] == parent_path), None)
+            if parent_node: parent_node['children'].append(node)
+            else: root_nodes.append(node)
+        else: root_nodes.append(node)
+
+    siblings = root_nodes
+    if did in node_map:
+        parts = node_map[did]['c_name'].split('::')
+        if len(parts) > 1:
+            parent_path = '::'.join(parts[:-1])
+            parent_node = next((n for n in node_map.values() if n['c_name'] == parent_path), None)
+            if parent_node: siblings = parent_node['children']
+    idx = next((i for i, s in enumerate(siblings) if s['id'] == did), 0)
+    count = len(siblings)
+    at_top = (idx == 0)
+    at_btm = (idx == count - 1)
+
     sub = menu.addMenu(get_msg("menu_name"))
-    sub.addAction(get_msg("move_top")).triggered.connect(lambda: quick_move(did, "top"))
-    sub.addAction(get_msg("move_up")).triggered.connect(lambda: quick_move(did, "up"))
-    sub.addAction(get_msg("move_down")).triggered.connect(lambda: quick_move(did, "down"))
-    sub.addAction(get_msg("move_btm")).triggered.connect(lambda: quick_move(did, "btm"))
+    act_top = sub.addAction(get_msg("move_top")); act_top.triggered.connect(lambda: quick_move(did, "top"))
+    act_up  = sub.addAction(get_msg("move_up"));  act_up.triggered.connect(lambda: quick_move(did, "up"))
+    act_dn  = sub.addAction(get_msg("move_down")); act_dn.triggered.connect(lambda: quick_move(did, "down"))
+    act_btm = sub.addAction(get_msg("move_btm")); act_btm.triggered.connect(lambda: quick_move(did, "btm"))
+    if at_top:  act_top.setEnabled(False); act_up.setEnabled(False)
+    if at_btm:  act_btm.setEnabled(False); act_dn.setEnabled(False)
     sub.addAction(get_msg("move_steps_menu")).triggered.connect(lambda: quick_move_steps(did))
     sub.addSeparator()
     sub.addAction(get_msg("move_parent")).triggered.connect(lambda: quick_change_parent(did))
-    sub.addAction(get_msg("unparent_menu")).triggered.connect(lambda: quick_unparent(did))
+
+    # 移出母牌組：已在最上層則 disable
+    target_info = next((d for d in all_d if d.id == did), None)
+    act_unparent = sub.addAction(get_msg("unparent_menu"))
+    act_unparent.triggered.connect(lambda: quick_unparent(did))
+    if target_info and clean_name(target_info.name).count('::') == 0:
+        act_unparent.setEnabled(False)
+
     sub.addSeparator()
     sub.addAction(get_msg("adv_mgr")).triggered.connect(lambda: DeckManagerDialog(mw).exec())
 
@@ -1103,10 +1146,10 @@ def init():
 gui_hooks.main_window_did_init.append(init)
 """
 
-# MANIFEST 更新至 v4.3.9
+# MANIFEST 更新至 v4.4.0
 MANIFEST = {
     "package": "UltimateDeckReorderPlus",
-    "name": "Deck_Reorder (v4.3.9)",
+    "name": "Deck_Reorder (v4.4.0)",
     "mod": 1710850031
 }
 
@@ -1124,7 +1167,7 @@ def build_addon():
         meta_data = {"name": MANIFEST["name"], "mod": MANIFEST["mod"]}
         zf.writestr('meta.json', json.dumps(meta_data, indent=4, ensure_ascii=False))
         zf.writestr('config.json', json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False))
-    print(f"Build Successful (v4.3.9): {os.path.abspath(filename)}")
+    print(f"Build Successful (v4.4.0): {os.path.abspath(filename)}")
 
 if __name__ == "__main__":
     build_addon()
