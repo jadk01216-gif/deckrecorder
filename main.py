@@ -3,16 +3,13 @@ import zipfile
 import json
 import os
 
-# --- v4.2.8 核心修復與無限位數演算法 ---
-# 1. 演算法 2.0: 導入 Elias Gamma 變體編碼，實現理論上「無限位數」的動態隱形字元排序。
-# 2. 順水推舟法: 完美解決嵌套牌組問題。順應 Anki 原生「改母連動子」的機制，採 Top-Down 即時讀取與覆寫。
-# 3. 修復母牌組拖曳: 客製化 ReorderTreeWidget 嚴格限制僅能進行同層級的兄弟節點重排。
-# 4. 修復快捷移動: 使 quick_move 具備「區塊意識 (Block-aware)」，完整跳躍子牌組群集。
-# 5. 動態語系切換: 儲存設定時，立即同步更新 Anki「工具」選單中的管理器名稱。
-# 6. 修正 Qt 6.9 拖曳報錯: 支援 event.position().toPoint() 相容寫法。
-# 7. 進階管理器擴充: 加入 UI 內的「上移/下移/頂端/底端/自訂格數/移置母牌組」按鈕。
-# 8. 齒輪擴充與教學: 齒輪選單加入「移動自訂格數...」，並在進階編輯器加入「📖 用法教學」。
-# 9. [v4.2.8] 攔截原生拖曳: 禁用 Anki 容易誤觸的原生拖曳，並彈窗引導使用者使用新的重排工具。
+# --- v4.2.9 終極搜尋與防護版 ---
+# 1. 演算法 2.0: 導入 Elias Gamma 編碼，實現「無限位數」的動態隱形字元排序。
+# 2. 順水推舟法: 完美解決嵌套牌組問題，Top-Down 即時讀取與覆寫。
+# 3. 修復快捷移動: 具備「區塊意識 (Block-aware)」，完整跳躍子牌組群集。
+# 4. [v4.2.9] 搜尋對話框: 為「移置母牌組」打造具備關鍵字搜尋過濾的視窗，並支援放入極深層的子牌組。
+# 5. [v4.2.9] 幽靈牌組修復: 嚴格解析絕對路徑，防止移出後殘留空牌組。
+# 6. [v4.2.9] 智能拖曳攔截: 允許原生放入子牌組，但攔截獨立拖曳重排，並顯示「正在開發整合中」的提示。
 
 ADDON_CODE = """
 import time
@@ -45,7 +42,7 @@ I18N = {
         "adv_mgr": "🛠️ 進階管理器...",
         "save": "✅ 儲存並套用",
         "help_btn": "📖 用法教學",
-        "title": "Deck_Reorder 管理器 (v4.2.8)",
+        "title": "Deck_Reorder 管理器 (v4.2.9)",
         "success": "設定已存檔並套用",
         "settings_group": "自動化與介面設定",
         "lang_label": "介面語言:",
@@ -61,13 +58,14 @@ I18N = {
         "dialog_no_selection": "請先在下方樹狀圖中選取一個牌組！",
         "dialog_parent_btn": "📂 移置母牌組",
         "dialog_parent_title": "變更母牌組",
-        "dialog_parent_desc": "請選擇新的母牌組:",
-        "dialog_parent_root": "< 最上層 (無) >",
+        "dialog_parent_desc": "請選擇新的目標牌組 (支援搜尋):",
+        "dialog_parent_root": "< 獨立出來 (最上層) >",
+        "search_placeholder": "🔍 搜尋牌組名稱...",
         "warn_out_of_bounds": "移動步數超出範圍！\\n只能在 0 到 {max_idx} 之間移動。",
         "warn_cannot_move": "已經在最邊緣，無法再移動了！",
-        "warn_native_drag": "🚫 偵測到原生拖曳操作！\\n\\nAnki 原生的拖曳只能把牌組變成子牌組，非常容易造成版面混亂。\\n\\n💡 欲改變順序或母子關係：\\n請點擊牌組右側的「齒輪圖示 ⚙️」選擇【📂 移置母牌組】或【🛠️ 進階管理器】來進行安全編輯！",
+        "warn_native_drag_wip": "🚧 系統提醒：\\n\\n允許您將牌組拖曳到另一個牌組內（使其成為子牌組）。\\n\\n但「單獨拖動以改變上下順序」的官方原生功能目前已被我們攔截，因為我們正努力把拖移排序功能完美整合，目前正在開發中！敬請期待！\\n\\n💡 欲改變排序：請點擊齒輪選擇【🔢 移動自訂格數】或使用【🛠️ 進階管理器】。",
         "tutorial_title": "Deck_Reorder 使用教學",
-        "tutorial_text": "【拖曳排序】\\n可以直接用滑鼠上下拖曳牌組。系統已啟用防呆，強制只能在同一個母層級內排序，不怕把排版弄亂。\\n\\n【自訂格數】\\n輸入正數往下移，輸入負數往上移。\\n\\n【移置母牌組】\\n如果想改變牌組的階層關係（例如從別人的子牌組獨立出來），請點擊「📂 移置母牌組」，選擇新的位置。\\n\\n【自動排序與歸檔】\\n上方可設定當 Anki 匯入全新牌組時，自動幫你把它丟到列表的「最上面」或「最下面」，甚至自動塞進某個特定的「預設父牌組」中。"
+        "tutorial_text": "【拖曳排序】\\n可以直接用滑鼠上下拖曳牌組。系統已啟用防呆，強制只能在同一個母層級內排序，不怕把排版弄亂。\\n\\n【自訂格數】\\n輸入正數往下移，輸入負數往上移。\\n\\n【移置母牌組】\\n如果想改變牌組的階層關係，請點擊「📂 移置母牌組」，現在支援關鍵字搜尋，可以輕鬆放進任何極深層的子牌組中！\\n\\n【自動排序與歸檔】\\n上方可設定當 Anki 匯入全新牌組時，自動幫你把它丟到列表的「最上面」或「最下面」，甚至自動塞進某個特定的「預設父牌組」中。"
     },
     "en": {
         "menu_name": "⇅ Deck Reorder",
@@ -80,7 +78,7 @@ I18N = {
         "adv_mgr": "🛠️ Advanced Manager...",
         "save": "✅ Save and Apply",
         "help_btn": "📖 Help / Tutorial",
-        "title": "Deck_Reorder Manager (v4.2.8)",
+        "title": "Deck_Reorder Manager (v4.2.9)",
         "success": "Settings saved and applied",
         "settings_group": "Automation & UI Settings",
         "lang_label": "Language:",
@@ -96,13 +94,14 @@ I18N = {
         "dialog_no_selection": "Please select a deck from the tree first!",
         "dialog_parent_btn": "📂 Set Parent",
         "dialog_parent_title": "Change Parent Deck",
-        "dialog_parent_desc": "Select new parent deck:",
-        "dialog_parent_root": "< Root (None) >",
+        "dialog_parent_desc": "Select new target deck (Searchable):",
+        "dialog_parent_root": "< Make Independent (Root) >",
+        "search_placeholder": "🔍 Search deck name...",
         "warn_out_of_bounds": "Steps out of bounds!\\nCan only move between 0 and {max_idx}.",
         "warn_cannot_move": "Already at the edge, cannot move further!",
-        "warn_native_drag": "🚫 Native Drag Detected!\\n\\nAnki's native drag-and-drop only converts decks into sub-decks, which often breaks the layout.\\n\\n💡 To reorder or change hierarchy:\\nPlease click the 'Gear Icon ⚙️' next to a deck and select 【📂 Change Parent】 or open the 【🛠️ Advanced Manager】 for safe editing!",
+        "warn_native_drag_wip": "🚧 Notice:\\n\\nYou are allowed to natively drag a deck into another to make it a sub-deck.\\n\\nHowever, standalone dragging for reordering is currently intercepted. We are working hard to integrate native drag-and-drop reordering, which is currently under development!\\n\\n💡 To reorder: Use the Gear menu 【🔢 Move N Steps】 or the 【🛠️ Advanced Manager】.",
         "tutorial_title": "Deck_Reorder Tutorial",
-        "tutorial_text": "[Drag & Drop]\\nYou can freely drag decks up or down. To prevent breaking the structure, dropping is restricted to the same parent level.\\n\\n[Custom Steps]\\nPositive number moves the deck down, negative moves it up.\\n\\n[Change Parent]\\nTo move a deck into or out of another deck, click '📂 Set Parent' and select the new destination.\\n\\n[Auto-Sort & Archive]\\nConfigure the settings above to automatically place newly imported decks at the very Top or Bottom, or even auto-route them into a specific Default Parent Deck."
+        "tutorial_text": "[Drag & Drop]\\nYou can freely drag decks up or down. To prevent breaking the structure, dropping is restricted to the same parent level.\\n\\n[Custom Steps]\\nPositive number moves the deck down, negative moves it up.\\n\\n[Change Parent]\\nTo move a deck, click '📂 Set Parent'. You can now search and move a deck into any deep sub-deck!\\n\\n[Auto-Sort & Archive]\\nConfigure the settings above to automatically place newly imported decks at the very Top or Bottom, or even auto-route them into a specific Default Parent Deck."
     }
 }
 
@@ -320,33 +319,79 @@ def quick_move_steps(did):
     apply_order_ultimate(flat_ids)
     tooltip(get_msg("success", lang))
 
+# [v4.2.9] 自製可搜尋的牌組選擇視窗 (Searchable UI)
+class SearchableDeckDialog(QDialog):
+    def __init__(self, parent, title, desc, items, placeholder="Search..."):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(450, 500)
+        layout = QVBoxLayout(self)
+
+        self.label = QLabel(desc)
+        layout.addWidget(self.label)
+
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText(placeholder)
+        self.search_bar.textChanged.connect(self.filter_items)
+        layout.addWidget(self.search_bar)
+
+        self.list_widget = QListWidget()
+        for text, data in items:
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, data)
+            self.list_widget.addItem(item)
+        layout.addWidget(self.list_widget)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btn_box.accepted.connect(self.accept)
+        btn_box.rejected.connect(self.reject)
+        layout.addWidget(btn_box)
+
+        self.list_widget.itemDoubleClicked.connect(self.accept)
+
+    def filter_items(self, text):
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            item.setHidden(text.lower() not in item.text().lower())
+
+    def get_selected_data(self):
+        item = self.list_widget.currentItem()
+        if item: return item.data(Qt.ItemDataRole.UserRole)
+        return None
+
 def quick_change_parent(did):
     lang = get_current_config().get(CONF_KEY_LANG, "en")
-    all_d = sorted([d for d in mw.col.decks.all_names_and_ids() if d.id != 1], key=lambda d: d.name)
+    all_d = sorted([d for d in mw.col.decks.all_names_and_ids() if d.id != 1], key=lambda d: clean_name(d.name))
     target_deck_info = next((d for d in all_d if d.id == did), None)
     if not target_deck_info: return
     
     target_clean = clean_name(target_deck_info.name)
     root_name = get_msg("dialog_parent_root", lang)
-    valid_targets = [(root_name, None)]
+    
+    # [v4.2.9] 支援完整的子牌組層級顯示
+    valid_targets = [(f"🌟 {root_name}", "")]
     
     for d in all_d:
         c_name = clean_name(d.name)
+        # 防止放入自己或自己的子牌組中
         if c_name == target_clean or c_name.startswith(target_clean + "::"): continue
         valid_targets.append((c_name, c_name))
         
-    target_names = [t[0] for t in valid_targets]
     title = get_msg("dialog_parent_title", lang)
     desc = get_msg("dialog_parent_desc", lang)
+    placeholder = get_msg("search_placeholder", lang)
     
-    selected_name, ok = QInputDialog.getItem(mw, title, desc, target_names, 0, False)
-    if not ok: return
+    # 叫出支援搜尋的對話框
+    dialog = SearchableDeckDialog(mw, title, desc, valid_targets, placeholder)
+    if not dialog.exec(): return
     
-    idx = target_names.index(selected_name)
-    new_parent_path = valid_targets[idx][1]
+    new_parent_path = dialog.get_selected_data()
+    if new_parent_path is None: return
+    
     deck_obj = mw.col.decks.get(did)
     if not deck_obj: return
     
+    # 嚴格抓取 basename 防止產生幽靈牌組
     basename = target_clean.split('::')[-1]
     new_full_path = f"{new_parent_path}::{basename}" if new_parent_path else basename
     
@@ -357,21 +402,24 @@ def quick_change_parent(did):
     if mw.deckBrowser: mw.deckBrowser.refresh()
     tooltip(get_msg("success", lang))
 
-# [v4.2.8] 核心擴充：攔截 Anki 原生的 JS 拖曳事件，防止版面混亂
+# [v4.2.9] 智能攔截 Anki 原生拖曳
 def intercept_native_drag(handled, message, context):
     if isinstance(context, DeckBrowser) and isinstance(message, str) and message.startswith("drag:"):
-        lang = get_current_config().get(CONF_KEY_LANG, "en")
-        title = get_msg("title", lang)
-        warn_msg = get_msg("warn_native_drag", lang)
-        
-        # 彈窗提示使用者
-        showInfo(warn_msg, title=title)
-        
-        # 強制刷新一次 DeckBrowser，把因為拖曳而產生變化的 HTML 結構還原
-        mw.deckBrowser.refresh()
-        
-        # 回傳 True 告訴 Anki：「我已經處理完了，請你不要執行原生的合併牌組動作」
-        return (True, None)
+        parts = message.split(":")
+        if len(parts) >= 3:
+            target_id = parts[2]
+            # 如果 target_id 是 0 或空值，代表使用者正試圖「單獨拖曳以改變順序」或「拉到最外層」
+            if not target_id or target_id == "0":
+                lang = get_current_config().get(CONF_KEY_LANG, "en")
+                title = get_msg("title", lang)
+                warn_msg = get_msg("warn_native_drag_wip", lang)
+                
+                showInfo(warn_msg, title=title)
+                mw.deckBrowser.refresh() # 強制還原畫面
+                return (True, None) # 攔截並阻斷 Anki 預設行為
+            else:
+                # 若 target_id 有值，代表使用者是把牌組放進「另一個牌組內」(成為子牌組)，予以放行
+                pass
     return handled
 
 def get_event_pos(event):
@@ -546,7 +594,7 @@ class DeckManagerDialog(QDialog):
             return
 
         root_name = get_msg("dialog_parent_root", lang)
-        valid_targets = [(root_name, None)]
+        valid_targets = [(f"🌟 {root_name}", "")]
 
         def is_descendant(potential_descendant, ancestor):
             p = potential_descendant.parent()
@@ -566,16 +614,25 @@ class DeckManagerDialog(QDialog):
 
         get_paths(self.tree.invisibleRootItem(), "")
 
-        target_names = [t[0] for t in valid_targets]
         title = get_msg("dialog_parent_title", lang)
         desc = get_msg("dialog_parent_desc", lang)
-        target_name, ok = QInputDialog.getItem(self, title, desc, target_names, 0, False)
+        placeholder = get_msg("search_placeholder", lang)
         
-        if ok:
-            idx = target_names.index(target_name)
-            target_item = valid_targets[idx][1]
+        # [v4.2.9] 使用支援搜尋的新對話框
+        dialog = SearchableDeckDialog(self, title, desc, valid_targets, placeholder)
+        if dialog.exec():
+            target_data = dialog.get_selected_data()
+            if target_data is None: return
+            
+            # target_data 可能為字串("")代表根目錄，或物件代表子節點
+            if target_data == "":
+                target_item = None
+            else:
+                target_item = target_data
+
             old_parent = item.parent() or self.tree.invisibleRootItem()
             old_parent.takeChild(old_parent.indexOfChild(item))
+            
             new_parent = target_item if target_item else self.tree.invisibleRootItem()
             new_parent.addChild(item)
             if target_item: target_item.setExpanded(True)
@@ -663,7 +720,7 @@ def init():
     gui_hooks.deck_browser_will_show_options_menu.append(on_deck_menu)
     gui_hooks.deck_browser_did_render.append(check_auto)
     
-    # [v4.2.8] 綁定原生拖曳攔截 Hook
+    # [v4.2.9] 綁定原生拖曳攔截 Hook
     gui_hooks.webview_did_receive_js_message.append(intercept_native_drag)
     
     _tools_action = QAction(get_msg("adv_mgr"), mw)
@@ -673,11 +730,11 @@ def init():
 gui_hooks.main_window_did_init.append(init)
 """
 
-# MANIFEST 更新至 v4.2.8
+# MANIFEST 更新至 v4.2.9
 MANIFEST = {
     "package": "UltimateDeckReorderPlus",
-    "name": "Deck_Reorder (v4.2.8)",
-    "mod": 1710850028
+    "name": "Deck_Reorder (v4.2.9)",
+    "mod": 1710850029
 }
 
 DEFAULT_CONFIG = {
@@ -695,7 +752,7 @@ def build_addon():
         meta_data = {"name": MANIFEST["name"], "mod": MANIFEST["mod"]}
         zf.writestr('meta.json', json.dumps(meta_data, indent=4, ensure_ascii=False))
         zf.writestr('config.json', json.dumps(DEFAULT_CONFIG, indent=4, ensure_ascii=False))
-    print(f"Build Successful (v4.2.8): {os.path.abspath(filename)}")
+    print(f"Build Successful (v4.2.9): {os.path.abspath(filename)}")
 
 if __name__ == "__main__":
     build_addon()
